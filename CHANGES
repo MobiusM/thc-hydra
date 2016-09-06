@@ -1,9 +1,18 @@
 Changelog for hydra
 -------------------
 
-Release 8.3-dev
-* Support for upcoming OpenSSL 1.1 added. needs testing.
+Release 8.4-dev
+* New command line option -y which disables -x 1aA interpretation, thanks to crondaemon for the patch
+* The protocols vnc, xmpp, telnet, imap, nntp and pcanywhere got accidentially long sleep commands due a patch in 8.2, fixed
+* Added special error message for clueless users :)
 
+
+Release 8.3
+* Support for upcoming OpenSSL 1.1 added. needs testing.
+* Fixed hydra redo bug (issue #113)
+* Updated xhydra for new hydra features and options
+* Some more command line error checking
+* Ensured unneeded sockets are closed
 
 Release 8.2
 * Added RTSP module, thanks to jjavi89 for supplying!

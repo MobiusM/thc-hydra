@@ -167,7 +167,7 @@ char *SERVICES =
 #define RESTOREFILE "./hydra.restore"
 
 #define PROGRAM   "Hydra"
-#define VERSION   "v8.3-dev"
+#define VERSION   "v8.4-dev"
 #define AUTHOR    "van Hauser/THC"
 #define EMAIL     "<vh@thc.org>"
 #define RESOURCE  "http://www.thc.org/thc-hydra"
@@ -302,6 +302,7 @@ hydra_brain hydra_brains;
 char *sck = NULL;
 int prefer_ipv6 = 0, conwait = 0, loop_cnt = 0, fck = 0, options = 0, killed = 0;
 int child_head_no = -1, child_socket;
+int total_redo_count = 0;
 
 // moved for restore feature
 int process_restore = 0, dont_unlink;
@@ -335,8 +336,10 @@ void help(int ext) {
   printf("  -l LOGIN or -L FILE  login with LOGIN name, or load several logins from FILE\n");
   printf("  -p PASS  or -P FILE  try password PASS, or load several passwords from FILE\n");
 #ifdef HAVE_MATH_H
-  if (ext)
+  if (ext) {
     printf("  -x MIN:MAX:CHARSET  password bruteforce generation, type \"-x -h\" to get help\n");
+    printf("  -y        disable use of symbols in bruteforce, see above\n");
+  }
 #endif
   if (ext)
     printf("  -e nsr    try \"n\" null password, \"s\" login as pass and/or \"r\" reversed login\n");
@@ -399,11 +402,13 @@ void help_bfg() {
          "     CHARSET is a specification of the characters to use in the generation\n"
          "             valid CHARSET values are: 'a' for lowercase letters,\n"
          "             'A' for uppercase letters, '1' for numbers, and for all others,\n"
-         "             just add their real representation.\n\n"
+         "             just add their real representation.\n"
+         "  -y         disable the use if the above letters as placeholders\n\n"
          "Examples:\n"
          "   -x 3:5:a  generate passwords from length 3 to 5 with all lowercase letters\n"
          "   -x 5:8:A1 generate passwords from length 5 to 8 with uppercase and numbers\n"
-         "   -x 1:3:/  generate passwords from length 1 to 3 containing only slashes\n" "   -x 5:5:/%%,.-  generate passwords with length 5 which consists only of /%%,.-\n");
+         "   -x 1:3:/  generate passwords from length 1 to 3 containing only slashes\n" "   -x 5:5:/%%,.-  generate passwords with length 5 which consists only of /%%,.-\n"
+         "   -x 3:5:aA1 -y generate passwords from length 3 to 5 with a, A and 1 only\n");
   printf("\nThe bruteforce mode was made by Jan Dlabal, http://houbysoft.com/bfg/\n");
   exit(-1);
 }
@@ -642,7 +647,7 @@ void module_usage() {
 }
 
 void hydra_debug(int force, char *string) {
-  int i;
+  int i, active = 0, inactive = 0;
 
   if (!debug && !force)
     return;
@@ -653,22 +658,30 @@ void hydra_debug(int force, char *string) {
          hydra_options.try_null_password, hydra_options.try_password_same_as_login, hydra_options.try_password_reverse_login, hydra_options.exit_found,
          hydra_options.miscptr == NULL ? "(null)" : hydra_options.miscptr, hydra_options.service);
   printf("[DEBUG] Brains: active %d  targets %d  finished %d  todo_all %lu  todo %lu  sent %lu  found %lu  countlogin %lu  sizelogin %lu  countpass %lu  sizepass %lu\n",
-         hydra_brains.active, hydra_brains.targets, hydra_brains.finished, hydra_brains.todo_all, hydra_brains.todo, hydra_brains.sent, hydra_brains.found,
+         hydra_brains.active, hydra_brains.targets, hydra_brains.finished, hydra_brains.todo_all + total_redo_count, hydra_brains.todo, hydra_brains.sent, hydra_brains.found,
          (unsigned long int) hydra_brains.countlogin, (unsigned long int) hydra_brains.sizelogin, (unsigned long int) hydra_brains.countpass,
          (unsigned long int) hydra_brains.sizepass);
   for (i = 0; i < hydra_brains.targets; i++)
     printf
-      ("[DEBUG] Target %d - target %s  ip %s  login_no %lu  pass_no %lu  sent %lu  pass_state %d  use_count %d  failed %d  done %d  fail_count %d  login_ptr %s  pass_ptr %s\n",
+      ("[DEBUG] Target %d - target %s  ip %s  login_no %lu  pass_no %lu  sent %lu  pass_state %d  redo_state %d (%d redos)  use_count %d  failed %d  done %d  fail_count %d  login_ptr %s  pass_ptr %s\n",
        i, hydra_targets[i]->target == NULL ? "(null)" : hydra_targets[i]->target, hydra_address2string(hydra_targets[i]->ip), hydra_targets[i]->login_no,
-       hydra_targets[i]->pass_no, hydra_targets[i]->sent, hydra_targets[i]->pass_state, hydra_targets[i]->use_count, hydra_targets[i]->failed, hydra_targets[i]->done,
+       hydra_targets[i]->pass_no, hydra_targets[i]->sent, hydra_targets[i]->pass_state, hydra_targets[i]->redo_state, hydra_targets[i]->redo, hydra_targets[i]->use_count, hydra_targets[i]->failed, hydra_targets[i]->done,
        hydra_targets[i]->fail_count, hydra_targets[i]->login_ptr == NULL ? "(null)" : hydra_targets[i]->login_ptr,
        hydra_targets[i]->pass_ptr == NULL ? "(null)" : hydra_targets[i]->pass_ptr);
-  if (hydra_heads != NULL)
+  if (hydra_heads != NULL) {
     for (i = 0; i < hydra_options.max_use; i++)
-      printf("[DEBUG] Task %d - pid %d  active %d  redo %d  current_login_ptr %s  current_pass_ptr %s\n",
+      if (hydra_heads[i]->active >= 0) {
+        printf("[DEBUG] Task %d - pid %d  active %d  redo %d  current_login_ptr %s  current_pass_ptr %s\n",
              i, (int) hydra_heads[i]->pid, hydra_heads[i]->active, hydra_heads[i]->redo,
              hydra_heads[i]->current_login_ptr == NULL ? "(null)" : hydra_heads[i]->current_login_ptr,
              hydra_heads[i]->current_pass_ptr == NULL ? "(null)" : hydra_heads[i]->current_pass_ptr);
+        if (hydra_heads[i]->active == 0)
+          inactive++;
+        else
+          active++;
+      }
+    printf("[DEBUG] Tasks %d inactive  %d active\n", inactive, active);
+  }
 }
 
 void bail(char *text) {
@@ -760,7 +773,7 @@ void hydra_restore_write(int print_msg) {
   fprintf(f, "%s\n", PROGRAM);
   fclose(f);
   if (debug)
-    printf("done\n");
+    printf("[DEBUG] done writing session file\n");
   if (print_msg)
     printf("The session file ./hydra.restore was written. Type \"hydra -R\" to resume session.\n");
   hydra_debug(0, "hydra_restore_write()");
@@ -1016,7 +1029,7 @@ unsigned long int countlines(FILE * fd, int colonmode) {
 #else
   FILE *fp = fd;
 #endif
- 
+
   size_of_data = 0;
 
 #ifdef HAVE_ZLIB
@@ -1633,6 +1646,7 @@ void hydra_increase_fail_count(int target_no, int head_no) {
         hydra_targets[target_no]->redo_login[hydra_targets[target_no]->redo] = hydra_heads[head_no]->current_login_ptr;
         hydra_targets[target_no]->redo_pass[hydra_targets[target_no]->redo] = hydra_heads[head_no]->current_pass_ptr;
         hydra_targets[target_no]->redo++;
+        total_redo_count++;
         if (debug)
           printf("[DEBUG] - will be retried at the end: ip %s - login %s - pass %s - child %d\n", hydra_targets[target_no]->target,
                  hydra_heads[head_no]->current_login_ptr, hydra_heads[head_no]->current_pass_ptr, head_no);
@@ -1664,6 +1678,7 @@ void hydra_increase_fail_count(int target_no, int head_no) {
         hydra_targets[target_no]->redo_login[hydra_targets[target_no]->redo] = hydra_heads[head_no]->current_login_ptr;
         hydra_targets[target_no]->redo_pass[hydra_targets[target_no]->redo] = hydra_heads[head_no]->current_pass_ptr;
         hydra_targets[target_no]->redo++;
+        total_redo_count++;
         if (debug)
           printf("[DEBUG] - will be retried at the end: ip %s - login %s - pass %s - child %d\n", hydra_targets[target_no]->target,
                  hydra_heads[head_no]->current_login_ptr, hydra_heads[head_no]->current_pass_ptr, head_no);
@@ -1708,7 +1723,7 @@ char *hydra_reverse_login(int head_no, char *login) {
   // UTF stuff now
   start = hydra_heads[head_no]->reverse;
   pos = start + j;
-  
+
   while(start < --pos) {
     switch( (*pos & 0xF0) >> 4 ) {
     case 0xF: /* U+010000-U+10FFFF: four bytes. */
@@ -1764,7 +1779,7 @@ int hydra_send_next_pair(int target_no, int head_no) {
   if (debug)
     printf
       ("[DEBUG] send_next_pair_init target %d, head %d, redo %d, redo_state %d, pass_state %d. loop_mode %d, curlogin %s, curpass %s, tlogin %s, tpass %s, logincnt %lu/%lu, passcnt %lu/%lu, loop_cnt %d\n",
-       target_no, head_no, hydra_heads[head_no]->redo, hydra_targets[target_no]->redo_state, hydra_targets[target_no]->pass_state, hydra_options.loop_mode,
+       target_no, head_no, hydra_targets[target_no]->redo, hydra_targets[target_no]->redo_state, hydra_targets[target_no]->pass_state, hydra_options.loop_mode,
        hydra_heads[head_no]->current_login_ptr, hydra_heads[head_no]->current_pass_ptr, hydra_targets[target_no]->login_ptr, hydra_targets[target_no]->pass_ptr,
        hydra_targets[target_no]->login_no, hydra_brains.countlogin, hydra_targets[target_no]->pass_no, hydra_brains.countpass, loop_cnt);
 
@@ -1782,15 +1797,25 @@ int hydra_send_next_pair(int target_no, int head_no) {
     if (debug && (hydra_heads[head_no]->current_login_ptr != NULL || hydra_heads[head_no]->current_pass_ptr != NULL))
       printf("[COMPLETED] target %s - login \"%s\" - pass \"%s\" - child %d - %lu of %lu\n",
              hydra_targets[target_no]->target, hydra_heads[head_no]->current_login_ptr, hydra_heads[head_no]->current_pass_ptr, head_no,
-             hydra_targets[target_no]->sent, hydra_brains.todo);
+             hydra_targets[target_no]->sent, hydra_brains.todo + hydra_targets[target_no]->redo);
     hydra_heads[head_no]->redo = 0;
     if (hydra_targets[target_no]->redo_state > 0) {
-      if (hydra_targets[target_no]->redo_state + 1 <= hydra_targets[target_no]->redo) {
+      if (hydra_targets[target_no]->redo_state <= hydra_targets[target_no]->redo) {
         hydra_heads[head_no]->current_pass_ptr = hydra_targets[target_no]->redo_pass[hydra_targets[target_no]->redo_state - 1];
         hydra_heads[head_no]->current_login_ptr = hydra_targets[target_no]->redo_login[hydra_targets[target_no]->redo_state - 1];
         hydra_targets[target_no]->redo_state++;
         snpdone = 1;
-      }                         // no else, that way a later lost pair is still added and done
+      } else {
+        // if a pair does not complete after this point it is lost
+        if (hydra_targets[target_no]->done == 0) {
+          hydra_targets[target_no]->done = 1;
+          hydra_brains.finished++;
+          if (verbose)
+            printf("[STATUS] attack finished for %s (waiting for children to complete tests)\n", hydra_targets[target_no]->target);
+        }
+        loop_cnt = 0;
+        return -1;
+      }
     } else {                    // normale state, no redo
       if (hydra_targets[target_no]->done) {
         loop_cnt = 0;
@@ -2011,7 +2036,8 @@ int hydra_send_next_pair(int target_no, int head_no) {
       if (hydra_targets[target_no]->done == 0) {
         hydra_targets[target_no]->done = 1;
         hydra_brains.finished++;
-        printf("[STATUS] attack finished for %s (waiting for children to finish) ...\n", hydra_targets[target_no]->target);
+        if (verbose)
+          printf("[STATUS] attack finished for %s (waiting for children to complete tests)\n", hydra_targets[target_no]->target);
       }
     }
     if (hydra_brains.targets > hydra_brains.finished)
@@ -2079,9 +2105,9 @@ int hydra_send_next_pair(int target_no, int head_no) {
       return 0;                 // not prevent disabling it, if its needed its already done in the above line
     }
     if (debug || hydra_options.showAttempt) {
-      printf("[%sATTEMPT] target %s - login \"%s\" - pass \"%s\" - %lu of %lu [child %d]\n",
+      printf("[%sATTEMPT] target %s - login \"%s\" - pass \"%s\" - %lu of %lu [child %d] (%d/%d)\n",
              hydra_targets[target_no]->redo_state ? "REDO-" : snp_is_redo ? "RE-" : "", hydra_targets[target_no]->target, hydra_heads[head_no]->current_login_ptr,
-             hydra_heads[head_no]->current_pass_ptr, hydra_targets[target_no]->sent, hydra_brains.todo + hydra_targets[target_no]->redo, head_no);
+             hydra_heads[head_no]->current_pass_ptr, hydra_targets[target_no]->sent, hydra_brains.todo + hydra_targets[target_no]->redo, head_no, hydra_targets[target_no]->redo_state ? hydra_targets[target_no]->redo_state - 1 : 0, hydra_targets[target_no]->redo);
     }
     loop_cnt = 0;
     return 0;
@@ -2284,13 +2310,14 @@ int main(int argc, char *argv[]) {
   hydra_brains.ofp = stdout;
   hydra_brains.targets = 1;
   hydra_options.waittime = waittime = WAITTIME;
+  bf_options.disable_symbols = 0;
 
   // command line processing
   if (argc > 1 && strncmp(argv[1], "-h", 2) == 0)
     help(1);
   if (argc < 2)
     help(0);
-  while ((i = getopt(argc, argv, "hq64Rde:vVl:fFg:L:p:OP:o:M:C:t:T:m:w:W:s:SUux:")) >= 0) {
+  while ((i = getopt(argc, argv, "hq64Rde:vVl:fFg:L:p:OP:o:M:C:t:T:m:w:W:s:SUux:y")) >= 0) {
     switch (i) {
     case 'h':
       help(1);
@@ -2314,7 +2341,7 @@ int main(int argc, char *argv[]) {
       hydra_options.restore = 1;
       break;
     case 'd':
-      hydra_options.debug = debug = 1;
+      hydra_options.debug = ++debug;
       ++verbose;
       break;
     case 'e':
@@ -2425,6 +2452,9 @@ int main(int argc, char *argv[]) {
       hydra_options.loop_mode = 1;
       break;
 #endif
+    case 'y':
+      bf_options.disable_symbols = 1;
+      break;
     default:
       exit(-1);
     }
@@ -2554,6 +2584,11 @@ int main(int argc, char *argv[]) {
           help(0);
       }
     } else {
+      if (strstr(argv[optind], "://") != NULL) {
+        printf("[ERROR] Invalid target definition!\n");
+        printf("[ERROR] Either you use \"www.example.com module [optional-module-parameters]\" *or* you use the \"module://www.example.com/optional-module-parameters\" syntax!\n");
+        exit(-1);
+      }
       hydra_options.server = argv[optind];
       cmdlinetarget = argv[optind];
       hydra_options.service = argv[optind + 1];
@@ -3321,6 +3356,8 @@ int main(int argc, char *argv[]) {
         tmpptr++;
       }
     } else if (index(hydra_options.server, '/') != NULL) {
+     if (cmdtarget == NULL)
+       bail("You seem to mix up \"service://target:port/options\" syntax with \"target service options\" syntax. Read the README on how to use hydra correctly!");
      if (strstr(cmdtarget, "://") != NULL) {
        tmpptr = index(hydra_options.server, '/');
        if (tmpptr != NULL)
@@ -3657,7 +3694,7 @@ int main(int argc, char *argv[]) {
     }
   }
   if (verbose)
-    printf("done\n");
+    printf("[VERBOSE] resolving done\n");
   if (hydra_brains.targets == 0)
     bail("No server to scan!");
 
@@ -3699,7 +3736,7 @@ int main(int argc, char *argv[]) {
   hydra_debug(0, "attack");
   process_restore = 1;
 
-  // this is the big function which starts the attacking children, feeds login/password pairs, etc.! 
+  // this is the big function which starts the attacking children, feeds login/password pairs, etc.!
   while (exit_condition == 0) {
     memset(&fdreadheads, 0, sizeof(fdreadheads));
     max_fd = 0;
@@ -3715,7 +3752,7 @@ int main(int argc, char *argv[]) {
     tmp_time = time(NULL);
 
     for (head_no = 0; head_no < hydra_options.max_use; head_no++) {
-      if (debug && hydra_heads[head_no]->active != -1)
+      if (debug > 1 && hydra_heads[head_no]->active != -1)
         printf("[DEBUG] head_no[%d] to target_no %d active %d\n", head_no, hydra_heads[head_no]->target_no, hydra_heads[head_no]->active);
       switch (hydra_heads[head_no]->active) {
       case -1:
@@ -3761,7 +3798,7 @@ int main(int argc, char *argv[]) {
               hydra_targets[hydra_heads[head_no]->target_no]->ok = 1;
               if (hydra_targets[hydra_heads[head_no]->target_no]->fail_count > 0)
                 hydra_targets[hydra_heads[head_no]->target_no]->fail_count--;
-              // no break here 
+              // no break here
             case 'n':          // mother sends this to itself initially
               loop_cnt = 0;
               if (hydra_send_next_pair(hydra_heads[head_no]->target_no, head_no) == -1)
@@ -3815,9 +3852,9 @@ int main(int argc, char *argv[]) {
                   fprintf(hydra_brains.ofp, "[%d][%s] host: %s   login: %s   password: %s\n", hydra_targets[hydra_heads[head_no]->target_no]->port, hydra_options.service,
                           hydra_targets[hydra_heads[head_no]->target_no]->target, hydra_heads[head_no]->current_login_ptr, hydra_heads[head_no]->current_pass_ptr);
               }
-              if (hydra_options.exit_found) {   // option set says quit target after on valid login/pass pair is found 
+              if (hydra_options.exit_found) {   // option set says quit target after on valid login/pass pair is found
                 if (hydra_targets[hydra_heads[head_no]->target_no]->done == 0) {
-                  hydra_targets[hydra_heads[head_no]->target_no]->done = 1;     // mark target as done 
+                  hydra_targets[hydra_heads[head_no]->target_no]->done = 1;     // mark target as done
                   hydra_brains.finished++;
                   printf("[STATUS] attack finished for %s (valid pair found)\n", hydra_targets[hydra_heads[head_no]->target_no]->target);
                 }
@@ -3831,9 +3868,9 @@ int main(int argc, char *argv[]) {
                 for (j = 0; j < hydra_options.max_use; j++)
                   if (hydra_heads[j]->active >= 0 && (hydra_heads[j]->target_no == target_no || hydra_options.exit_found == 2)) {
                     if (hydra_brains.targets > hydra_brains.finished && hydra_options.exit_found < 2)
-                      hydra_kill_head(j, 1, 0); // kill all heads working on the target 
+                      hydra_kill_head(j, 1, 0); // kill all heads working on the target
                     else
-                      hydra_kill_head(j, 1, 2); // kill all heads working on the target 
+                      hydra_kill_head(j, 1, 2); // kill all heads working on the target
                   }
                 continue;
               }
@@ -3848,7 +3885,7 @@ int main(int argc, char *argv[]) {
               fck = write(hydra_heads[head_no]->sp[1], "n", 1); // small hack
               break;
 
-              // we do not make a difference between 'C' and 'E' results - yet 
+              // we do not make a difference between 'C' and 'E' results - yet
             case 'E':          // head reports protocol error
             case 'C':          // head reports connect error
               fck = write(hydra_heads[head_no]->sp[0], "Q", 1);
@@ -3901,11 +3938,11 @@ int main(int argc, char *argv[]) {
         hydra_increase_fail_count(hydra_heads[head_no]->target_no, head_no);
       }
     }
-    if (debug) printf("DEBUG: bug hunt: %lu %lu\n", hydra_brains.todo_all, hydra_brains.sent);
+    //if (debug) printf("DEBUG: bug hunt: %lu %lu\n", hydra_brains.todo_all, hydra_brains.sent);
 
     usleepn(USLEEP_LOOP);
     (void) wait3(NULL, WNOHANG, NULL);
-    // write restore file and report status 
+    // write restore file and report status
     if (process_restore == 1 && time(NULL) - elapsed_restore > 299) {
       hydra_restore_write(0);
       elapsed_restore = time(NULL);
@@ -3919,33 +3956,34 @@ int main(int argc, char *argv[]) {
       tmp_time = hydra_brains.sent / tmp_time;
       if (tmp_time < 1)
         tmp_time = 1;
-      if (status_print < 15 * 59)
-        status_print = ((status_print + 1) * 2) - 1;
-      if (status_print > 299 && (hydra_brains.todo_all - hydra_brains.sent) / tmp_time < 1500)
-        status_print = 299;
-      if (((hydra_brains.todo_all - hydra_brains.sent) / tmp_time) < 150)
-        status_print = 59;
+      if (debug == 0) {
+        if (status_print < 15 * 59)
+          status_print = ((status_print + 1) * 2) - 1;
+        if (status_print > 299 && ((hydra_brains.todo_all + total_redo_count) - hydra_brains.sent) / tmp_time < 1500)
+          status_print = 299;
+        if ((((hydra_brains.todo_all + total_redo_count) - hydra_brains.sent) / tmp_time) < 150)
+          status_print = 59;
+      }
       k = 0;
       for (j = 0; j < hydra_options.max_use; j++)
         if (hydra_heads[j]->active >= 0)
           k++;
-      if (hydra_brains.todo_all < hydra_brains.sent) { //in case of overflow of unsigned "-1"
+      if ((hydra_brains.todo_all + total_redo_count) < hydra_brains.sent) { //in case of overflow of unsigned "-1"
         for (i = 0; i < hydra_options.max_use; i++)
           if (hydra_heads[i]->active > 0 && hydra_heads[i]->pid > 0)
             hydra_kill_head(i, 1, 3);
-        if (debug) printf("DEBUG: %lu %lu\n", hydra_brains.todo_all, hydra_brains.sent);
-//        printf("ERROR: weird bug detected!\n");
-        bail("Weird bug detected where more tests were performed than possible. Please post your command line here: https://github.com/vanhauser-thc/thc-hydra/issues/113 or send it in an email to vh@thc.org");
+        printf("[BUG] %lu + %d < %lu\n", hydra_brains.todo_all, total_redo_count, hydra_brains.sent);
+        bail("[BUG] Weird bug detected where more tests were performed than possible. Please rerun with -d command line switch and post all output plus command line here: https://github.com/vanhauser-thc/thc-hydra/issues/113 or send it in an email to vh@thc.org");
       }
-      printf("[STATUS] %.2f tries/min, %lu tries in %02lu:%02luh, %lu to do in %02lu:%02luh, %d active\n", (1.0 * hydra_brains.sent) / (((elapsed_status - starttime) * 1.0) / 60),     // tries/min 
-             hydra_brains.sent, // tries 
-             (long unsigned int) ((elapsed_status - starttime) / 3600), // hours 
-             (long unsigned int) (((elapsed_status - starttime) % 3600) / 60),  // minutes 
-             hydra_brains.todo_all - hydra_brains.sent <= 0 ? 1 : hydra_brains.todo_all - hydra_brains.sent,    // left todo 
-             (long unsigned int) (((double) hydra_brains.todo_all - hydra_brains.sent) / ((double) hydra_brains.sent / (elapsed_status - starttime))
-             ) / 3600,          // hours 
-             (((long unsigned int) (((double) hydra_brains.todo_all - hydra_brains.sent) / ((double) hydra_brains.sent / (elapsed_status - starttime))
-               ) % 3600) / 60) + 1,     // min 
+      printf("[STATUS] %.2f tries/min, %lu tries in %02lu:%02luh, %lu to do in %02lu:%02luh, %d active\n", (1.0 * hydra_brains.sent) / (((elapsed_status - starttime) * 1.0) / 60),     // tries/min
+             hydra_brains.sent, // tries
+             (long unsigned int) ((elapsed_status - starttime) / 3600), // hours
+             (long unsigned int) (((elapsed_status - starttime) % 3600) / 60),  // minutes
+             (hydra_brains.todo_all + total_redo_count) - hydra_brains.sent <= 0 ? 1 : (hydra_brains.todo_all + total_redo_count) - hydra_brains.sent,    // left todo
+             (long unsigned int) (((double) (hydra_brains.todo_all + total_redo_count) - hydra_brains.sent) / ((double) hydra_brains.sent / (elapsed_status - starttime))
+             ) / 3600,          // hours
+             (((long unsigned int) (((double) (hydra_brains.todo_all + total_redo_count) - hydra_brains.sent) / ((double) hydra_brains.sent / (elapsed_status - starttime))
+               ) % 3600) / 60) + 1,     // min
              k);
       hydra_debug(0, "STATUS");
     }
@@ -4011,7 +4049,7 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "[ERROR] %d target%s did not complete\n", j, j == 1 ? "" : "s");
     error = 1;
   }
-  // yeah we did it 
+  // yeah we did it
   printf("%s (%s) finished at %s\n", PROGRAM, RESOURCE, hydra_build_time());
   if (hydra_brains.ofp != NULL && hydra_brains.ofp != stdout)
     fclose(hydra_brains.ofp);
